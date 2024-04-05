@@ -1,1 +1,1 @@
-# Intelligent_NLP-based_WAF
+# Intelligent_WAF
