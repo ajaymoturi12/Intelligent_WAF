@@ -1,0 +1,2 @@
+# Do not upload dataset files with the MATLAB extension
+*.mat
