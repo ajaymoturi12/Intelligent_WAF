@@ -1,2 +1,8 @@
-# Do not upload dataset files with the MATLAB extension
-*.mat
+# Dataset Files
+dataset
+
+# MacOS
+.DS_Store
+
+# JetBrains
+.idea
