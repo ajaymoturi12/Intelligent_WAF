@@ -1,18 +1,21 @@
 import os
 from typing import List
+from collections import Counter
 
-import torch
 from torch.utils.data import Dataset
 
 import pandas as pd
+from sklearn.preprocessing import LabelEncoder
 
 from tokenizers import Tokenizer
 from tokenizers.models import BPE
 from tokenizers.trainers import BpeTrainer
 from tokenizers.pre_tokenizers import ByteLevel
 
+from urllib import parse
+
 class CSICDataset(Dataset):
-    def __init__(self, csv_path: str, vocab_size: int, min_frequency: int, special_tokens=["[UNK]","[CLS]"]):
+    def __init__(self, csv_path: str, vocab_size: int, min_frequency: int, special_tokens=["[UNK]","[CLS]"], tokenization_algorithm="bpe"):
         self.df = pd.read_csv(csv_path)
         self.process_df()
 
@@ -23,7 +26,8 @@ class CSICDataset(Dataset):
         self.df.to_csv(path_or_buf=path, columns=['content_for_tokenization'], index=False, header=False)
 
         vocab = Vocab(vocab_size=vocab_size, min_frequency=min_frequency,
-                           special_tokens=special_tokens)
+                           special_tokens=special_tokens,
+                           tokenization_algorithm=tokenization_algorithm)
 
         vocab.build(corpus_files=[path])
         self.vocab = vocab
@@ -38,26 +42,28 @@ class CSICDataset(Dataset):
         self.df.loc[post_mask,"content_for_tokenization"] = self.df.loc[post_mask,"POST-Data"]
 
         self.df = self.df[get_mask | post_mask]
-        self.df = self.df.drop(columns=["GET-Query","POST-Data"])
+        self.df = self.df.drop(columns=["GET-Query","POST-Data", "Accept-Charset", "Accept-Language", "Accept", "Cache-control", "Pragma", "Content-Type", "Host-Header", "Connection"])
     
     def encode_df(self):
         # Tokenize the GET-Query and POST-Data columns according to the subword vocabulary learned from BPE
         self.df["tokenized_ids"] = self.df["content_for_tokenization"].apply(lambda x: self.vocab.words2indices(x))
         self.df["tokenized"] = self.df["content_for_tokenization"].apply(lambda x: self.vocab.tokenize(x))
-        
         self.df = self.df.drop(columns=["content_for_tokenization"])
+
+        self.class_encoder, self.method_encoder = LabelEncoder(), LabelEncoder()
+        self.df['Class'], self.df['Method'] = self.class_encoder.fit_transform(self.df['Class']), self.class_encoder.fit_transform(self.df['Method'])
 
     def __len__(self):
         return len(self.df)
     
     def __getitem__(self, index):
-        features = self.df.iloc[index].drop('Class')
+        features = self.df.iloc[index].drop(['Class', 'User-Agent'])
         label = self.df.iloc[index]['Class']
         
         return features, label
         
 class Vocab(object):
-    def __init__(self, vocab_size=0, min_frequency=0, special_tokens: List[str]=[], unk_token="[UNK]", tokenizer=None):
+    def __init__(self, vocab_size=0, min_frequency=0, special_tokens: List[str]=[], unk_token="[UNK]", tokenizer=None, tokenization_algorithm="bpe"):
         if tokenizer:
             self.tokenizer = tokenizer
             
@@ -73,17 +79,55 @@ class Vocab(object):
             self.vocab_size = vocab_size
             self.min_frequency = min_frequency
             self.special_tokens = special_tokens
+            self.unk_token = unk_token
+            self.tokenization_algorithm = tokenization_algorithm
 
     def build(self, corpus_files: List[str], unk_token="[UNK]"):
-        tokenizer = Tokenizer(BPE(unk_token=unk_token))
-        trainer = BpeTrainer(vocab_size=self.vocab_size, min_frequency=self.min_frequency, special_tokens=self.special_tokens)
-        tokenizer.pre_tokenizer = ByteLevel()
+        if self.tokenization_algorithm == 'bpe':
+            tokenizer = Tokenizer(BPE(unk_token=unk_token))
+            trainer = BpeTrainer(vocab_size=self.vocab_size, min_frequency=self.min_frequency, special_tokens=self.special_tokens)
+            tokenizer.pre_tokenizer = ByteLevel()
 
-        tokenizer.train(corpus_files, trainer)
+            tokenizer.train(corpus_files, trainer)
+            
+            self.tokenizer = tokenizer
+            self.word2id = tokenizer.get_vocab()
+            self.id2word = {v: k for k, v in self.word2id.items()}
         
-        self.tokenizer = tokenizer
-        self.word2id = tokenizer.get_vocab()
-        self.id2word = {v: k for k, v in self.word2id.items()}
+        elif self.tokenization_algorithm == 'vocab_map':
+            self.word2id, self.id2word = dict(), dict()
+            curr_id, cutoff = 1,1
+            counter = Counter()
+
+            def add_to_vocab(token: str, ignore_cutoff=False):
+                nonlocal curr_id
+                if (ignore_cutoff or counter[token] >= cutoff) and token not in self.word2id:
+                    self.word2id[token] = curr_id
+                    self.id2word[curr_id] = token
+
+                    curr_id += 1
+            
+            for file_path in corpus_files:
+                with open(file_path, 'r') as file:
+                    for line in file:
+                        tokens = Vocab.parse_req_body_or_params(line)
+                        counter.update(tokens)
+            
+            unwanted_tokens = [' ','']
+            for token in unwanted_tokens:
+                if token in counter:
+                    del counter[token]
+
+            for token in self.special_tokens:
+                add_to_vocab(token, ignore_cutoff=True)
+
+            add_to_vocab(unk_token)
+
+            for token in set(counter.elements()):
+                add_to_vocab(token)
+
+        else:
+            raise TypeError("Unsupported tokenization algorithm detected")
 
         self.unk_id = self.word2id[unk_token]
 
@@ -109,16 +153,46 @@ class Vocab(object):
         self.tokenizer.save(path=file_path)
 
     def words2indices(self, content):
-        if type(content) == list:
-            return [self.tokenizer.encode(row).ids for row in content]
+        if self.tokenization_algorithm == 'bpe':
+            if type(content) == list:
+                return [self.tokenizer.encode(row).ids for row in content]
+            else:
+                return self.tokenizer.encode(content).ids
+            
+        elif self.tokenization_algorithm == 'vocab_map':
+            if type(content) == list:
+                return [[self[token] for token in Vocab.parse_req_body_or_params(line)] for line in content]
+            else:
+                return [self[token] for token in Vocab.parse_req_body_or_params(content)]
         else:
-            return self.tokenizer.encode(content).ids
+            raise TypeError("Unsupported tokenization algorithm detected")
         
     def tokenize(self, content):
-        if type(content) == list:
-            return [self.tokenizer.encode(row).tokens for row in content]
+        if self.tokenization_algorithm == 'bpe':
+            if type(content) == list:
+                return [self.tokenizer.encode(row).tokens for row in content]
+            else:
+                return self.tokenizer.encode(content).tokens
+            
+        elif self.tokenization_algorithm == 'vocab_map':
+            if type(content) == list:
+                return [[token if self.__contains__(token) else self.unk_token for token in Vocab.parse_req_body_or_params(line)] for line in content]
+            else:
+                return [token if self.__contains__(token) else self.unk_token for token in Vocab.parse_req_body_or_params(content)]
+
         else:
-            return self.tokenizer.encode(content).tokens
+            raise TypeError("Unsupported tokenization algorithm detected")
+        
+    @staticmethod
+    def parse_req_body_or_params(line: str):
+        parsed_line = parse.parse_qs(parse.unquote_plus(string=line))
+
+        tokens = []
+        for k, v in parsed_line.items():
+            tokens.append(k)
+            tokens.extend(v)
+
+        return tokens
 
     @staticmethod
     def load(file_path: str):
