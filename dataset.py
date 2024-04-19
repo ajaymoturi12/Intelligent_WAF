@@ -41,8 +41,11 @@ class CSICDataset(Dataset):
         self.df = self.df.drop(columns=["GET-Query","POST-Data"])
     
     def encode_df(self):
+        # Tokenize the GET-Query and POST-Data columns according to the subword vocabulary learned from BPE
         self.df["tokenized_ids"] = self.df["content_for_tokenization"].apply(lambda x: self.vocab.words2indices(x))
         self.df["tokenized"] = self.df["content_for_tokenization"].apply(lambda x: self.vocab.tokenize(x))
+        
+        self.df = self.df.drop(columns=["content_for_tokenization"])
 
     def __len__(self):
         return len(self.df)
