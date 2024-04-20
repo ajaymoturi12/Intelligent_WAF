@@ -16,7 +16,7 @@ from tokenizers.pre_tokenizers import ByteLevel
 from urllib import parse
 
 class CSICDataset(Dataset):
-    def __init__(self, df: pd.DataFrame, vocab=None, vocab_size=1000, min_frequency=1, special_tokens=["[UNK]","[CLS]"], tokenization_algorithm="bpe"):
+    def __init__(self, df: pd.DataFrame, vocab=None, vocab_size=1000, min_frequency=1, special_tokens=["[UNK]","[CLS]","[PAD]"], tokenization_algorithm="bpe"):
         self.df = df
 
         # Export text content to csv for learning tokenization; apply BPE
@@ -66,7 +66,7 @@ class CSICDataset(Dataset):
         return features, label
         
 class Vocab(object):
-    def __init__(self, vocab_size=0, min_frequency=0, special_tokens: List[str]=[], unk_token="[UNK]", tokenizer=None, tokenization_algorithm="bpe"):
+    def __init__(self, vocab_size=0, min_frequency=0, special_tokens: List[str]=[], unk_token="[UNK]", pad_token="[PAD]", tokenizer=None, tokenization_algorithm="bpe"):
         if tokenizer:
             self.tokenizer = tokenizer
             
@@ -83,11 +83,12 @@ class Vocab(object):
             self.min_frequency = min_frequency
             self.special_tokens = special_tokens
             self.unk_token = unk_token
+            self.pad_token = pad_token
             self.tokenization_algorithm = tokenization_algorithm
 
-    def build(self, corpus_files: List[str], unk_token="[UNK]"):
+    def build(self, corpus_files: List[str]):
         if self.tokenization_algorithm == 'bpe':
-            tokenizer = Tokenizer(BPE(unk_token=unk_token))
+            tokenizer = Tokenizer(BPE(unk_token=self.unk_token))
             trainer = BpeTrainer(vocab_size=self.vocab_size, min_frequency=self.min_frequency, special_tokens=self.special_tokens)
             tokenizer.pre_tokenizer = ByteLevel()
 
@@ -124,15 +125,14 @@ class Vocab(object):
             for token in self.special_tokens:
                 add_to_vocab(token, ignore_cutoff=True)
 
-            add_to_vocab(unk_token)
-
             for token in set(counter.elements()):
                 add_to_vocab(token)
 
         else:
             raise TypeError("Unsupported tokenization algorithm detected")
 
-        self.unk_id = self.word2id[unk_token]
+        self.unk_id = self.word2id[self.unk_token]
+        self.pad_id = self.word2id[self.pad_token]
 
     def __getitem__(self, word):
         return self.word2id.get(word, self.unk_id)
