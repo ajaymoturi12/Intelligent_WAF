@@ -2,6 +2,7 @@ import os
 from typing import List
 from collections import Counter
 
+import torch
 from torch.utils.data import Dataset
 
 import pandas as pd
@@ -15,34 +16,36 @@ from tokenizers.pre_tokenizers import ByteLevel
 from urllib import parse
 
 class CSICDataset(Dataset):
-    def __init__(self, csv_path: str, vocab_size: int, min_frequency: int, special_tokens=["[UNK]","[CLS]"], tokenization_algorithm="bpe"):
-        self.df = pd.read_csv(csv_path)
-        self.process_df()
+    def __init__(self, df: pd.DataFrame, vocab=None, vocab_size=1000, min_frequency=1, special_tokens=["[UNK]","[CLS]"], tokenization_algorithm="bpe"):
+        self.df = df
 
         # Export text content to csv for learning tokenization; apply BPE
-        path = os.path.dirname(csv_path)
-        path = os.path.join(path, 'tokenization_input')
+        path = os.path.join('.', 'tokenization_input')
         
         self.df.to_csv(path_or_buf=path, columns=['content_for_tokenization'], index=False, header=False)
 
-        vocab = Vocab(vocab_size=vocab_size, min_frequency=min_frequency,
+        if vocab == None:
+            vocab = Vocab(vocab_size=vocab_size, min_frequency=min_frequency,
                            special_tokens=special_tokens,
                            tokenization_algorithm=tokenization_algorithm)
-
-        vocab.build(corpus_files=[path])
+            vocab.build(corpus_files=[path])
+        
         self.vocab = vocab
         
         self.encode_df()
 
-    def process_df(self):
+    @staticmethod
+    def process_df(df: pd.DataFrame):
         # Pre-process data by dropping rows without POST-Data or GET-Query
-        get_mask, post_mask = self.df['GET-Query'].notna(), self.df['POST-Data'].notna()
+        get_mask, post_mask = df['GET-Query'].notna(), df['POST-Data'].notna()
 
-        self.df.loc[get_mask,"content_for_tokenization"] = self.df.loc[get_mask,"GET-Query"]
-        self.df.loc[post_mask,"content_for_tokenization"] = self.df.loc[post_mask,"POST-Data"]
+        df.loc[get_mask,"content_for_tokenization"] = df.loc[get_mask,"GET-Query"]
+        df.loc[post_mask,"content_for_tokenization"] = df.loc[post_mask,"POST-Data"]
 
-        self.df = self.df[get_mask | post_mask]
-        self.df = self.df.drop(columns=["GET-Query","POST-Data", "Accept-Charset", "Accept-Language", "Accept", "Cache-control", "Pragma", "Content-Type", "Host-Header", "Connection"])
+        df = df[get_mask | post_mask]
+        df = df.drop(columns=["GET-Query","POST-Data", "Accept-Charset", "Accept-Language", "Accept", "Cache-control", "Pragma", "Content-Type", "Host-Header", "Connection"])
+
+        return df
     
     def encode_df(self):
         # Tokenize the GET-Query and POST-Data columns according to the subword vocabulary learned from BPE
@@ -57,10 +60,11 @@ class CSICDataset(Dataset):
         return len(self.df)
     
     def __getitem__(self, index):
-        features = self.df.iloc[index].drop(['Class', 'User-Agent'])
+        # features = self.df.iloc[index].drop(['Class', 'User-Agent'])
+        tokenized_word_tensor = torch.tensor(self.df.iloc[index]['tokenized_ids'], dtype=torch.long)
         label = self.df.iloc[index]['Class']
         
-        return features, label
+        return tokenized_word_tensor, label
         
 class Vocab(object):
     def __init__(self, vocab_size=0, min_frequency=0, special_tokens: List[str]=[], unk_token="[UNK]", tokenizer=None, tokenization_algorithm="bpe"):
@@ -96,12 +100,12 @@ class Vocab(object):
         
         elif self.tokenization_algorithm == 'vocab_map':
             self.word2id, self.id2word = dict(), dict()
-            curr_id, cutoff = 1,1
+            curr_id, self.min_frequency = 1,1
             counter = Counter()
 
             def add_to_vocab(token: str, ignore_cutoff=False):
                 nonlocal curr_id
-                if (ignore_cutoff or counter[token] >= cutoff) and token not in self.word2id:
+                if (ignore_cutoff or counter[token] >= self.min_frequency) and token not in self.word2id:
                     self.word2id[token] = curr_id
                     self.id2word[curr_id] = token
 
