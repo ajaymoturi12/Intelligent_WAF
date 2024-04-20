@@ -60,11 +60,10 @@ class CSICDataset(Dataset):
         return len(self.df)
     
     def __getitem__(self, index):
-        # features = self.df.iloc[index].drop(['Class', 'User-Agent'])
-        tokenized_word_tensor = torch.tensor(self.df.iloc[index]['tokenized_ids'], dtype=torch.long)
+        features = self.df.iloc[index].drop(['Class', 'User-Agent'])
         label = self.df.iloc[index]['Class']
         
-        return tokenized_word_tensor, label
+        return features, label
         
 class Vocab(object):
     def __init__(self, vocab_size=0, min_frequency=0, special_tokens: List[str]=[], unk_token="[UNK]", tokenizer=None, tokenization_algorithm="bpe"):
